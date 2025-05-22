@@ -257,7 +257,7 @@ with tab1:
             st.session_state.last_image_path = None
             st.session_state.last_image_info = None
     
-    uploaded_file = st.file_uploader("Elige una imagen PNG", type=["png"], key="upload_single_image")
+    uploaded_file = st.file_uploader("Elige una imagen PNG", type=["jpg"], key="upload_single_image")
     
     if uploaded_file is not None:
         try:
