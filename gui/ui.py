@@ -6,9 +6,11 @@ import cv2
 import os
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
-
+from transformers import CLIPProcessor, CLIPModel
 import types
 import torch
+import json
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Patch torch.classes so Streamlit doesn't crash
 if not hasattr(torch, 'classes'):
@@ -20,13 +22,109 @@ PATH = os.path.abspath(os.path.dirname(__file__))
 WARDROBE_DIR = os.path.join(PATH, "wardrobe_items")
 os.makedirs(WARDROBE_DIR, exist_ok=True)
 
+METADATA_FILE = os.path.join(WARDROBE_DIR, "wardrobe_metadata.json")
+
+# --- Metadata Loading and Saving ---
+def load_metadata():
+    if os.path.exists(METADATA_FILE):
+        with open(METADATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_metadata(metadata):
+    with open(METADATA_FILE, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+# --- Streamlit Dialogs ---
+@st.dialog("Suggested Outfit")
+def show_outfit_dialog(target_id, metadata):
+    outfit_ids = suggest_outfit(target_id, metadata)
+    
+    if not outfit_ids:
+        st.warning("No suitable outfit suggestions found.")
+    else:
+        st.markdown("### Matching Items:")
+        for oid in outfit_ids:
+            item = metadata[oid]
+            olabel = item["label"]
+            opath = os.path.join(WARDROBE_DIR, oid)
+            st.image(opath, caption=f"{olabel.capitalize()} (Suggested)", use_container_width=True)
+
+@st.dialog("Clothing Item Details")
+def show_item_details(item_path, meta):
+    st.image(item_path, use_container_width=True)
+    
+    if meta.get("style"):
+        st.markdown(f"**Predicted Style:** `{meta['style']}`")
+
+    if meta.get("colors"):
+        colors = np.array(meta["colors"])
+        st.markdown("**Dominant Colors:**")
+        plot_colors(colors)
+
+# --- Model Loading ---
 @st.cache_resource
-def load_model():
+def load_clip():
+    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+    return processor, model
+
+@st.cache_resource
+def load_yolo():
     model_path = os.path.join(PATH, "..", "weights", "best.pt")
     return YOLO(model_path)
 
+STYLE_LABELS = ["casual", "formal", "sporty", "streetwear", "bohemian", "business", "vintage", "chic"]
+
+@st.cache_resource
+def predict_style(pil_image):
+    processor, model = load_clip()
+    inputs = processor(text=STYLE_LABELS, images=pil_image, return_tensors="pt", padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits_per_image = outputs.logits_per_image
+        probs = logits_per_image.softmax(dim=1).cpu().numpy()[0]
+
+    # Return the most probable label and full distribution
+    style = STYLE_LABELS[np.argmax(probs)]
+    return style, dict(zip(STYLE_LABELS, map(float, probs)))
+
+def outfit_similarity(item_a, item_b, weight_style=0.6, weight_color=0.4):
+    # Style similarity
+    style_sim = cosine_similarity(
+        [item_a["style_probs"]], [item_b["style_probs"]]
+    )[0][0]
+
+    # Color similarity (mean color per item)
+    color_a = np.mean(item_a["colors"], axis=0)
+    color_b = np.mean(item_b["colors"], axis=0)
+    color_sim = cosine_similarity([color_a], [color_b])[0][0]
+
+    return weight_style * style_sim + weight_color * color_sim
+
+def suggest_outfit(target_id, metadata, top_n=2):
+    target = metadata[target_id]
+    label = target["label"]
+
+    # Only compare with items in different categories
+    candidates = {
+        k: v for k, v in metadata.items()
+        if k != target_id and v["label"] != label
+    }
+
+    if not candidates:
+        return []
+
+    scores = []
+    for cid, data in candidates.items():
+        score = outfit_similarity(target, data)
+        scores.append((cid, score))
+
+    top_matches = sorted(scores, key=lambda x: -x[1])[:top_n]
+    return [match[0] for match in top_matches]
+
 def extract_clothes(image):
-    model = load_model()
+    model = load_yolo()
     results = model(image)
     orig = np.array(image.convert("RGB"))
     clothes = []
@@ -46,9 +144,10 @@ def extract_clothes(image):
         masked_img[:, :, 3] = (mask * 255).astype(np.uint8)
 
         clothes.append((Image.fromarray(masked_img), label))  # return label with image
-
     return clothes
 
+
+# --- Color Extraction ---
 def extract_dominant_colors(pil_img, k=5):
     np_image = np.array(pil_img.convert("RGBA"))
     mask = np_image[:, :, 3] > 0
@@ -99,13 +198,27 @@ def center_and_scale(image, output_size=(256, 256)):
 
     return canvas
 
-def save_item(image, label, idx):
+def save_item(image, label, idx, style=None, style_probs=None, colors=None):
     label_folder = os.path.join(WARDROBE_DIR, label)
     os.makedirs(label_folder, exist_ok=True)
-    
+
     filename = f"item_{idx}_{np.random.randint(1e6)}.png"
     path = os.path.join(label_folder, filename)
     image.save(path)
+
+    metadata = load_metadata()
+    id = "/".join(path.split("/")[-2:])
+
+    color_list = [color.tolist() for color in colors] if colors is not None else None
+
+    metadata[id] = {
+        "label": label,
+        "style": style,
+        "style_probs": list(style_probs.values()) if style_probs else None,
+        "colors": color_list,
+    }
+    save_metadata(metadata)
+
     return path
 
 def list_wardrobe_items():
@@ -142,19 +255,33 @@ if page == "Upload Clothes":
             centered_item = center_and_scale(item)
             st.image(centered_item, caption=f"Clothing Item {idx+1}", use_container_width=True)
 
+            colors = extract_dominant_colors(centered_item)
             with st.expander(f"🎨 Dominant Colors for Item {idx+1}"):
-                colors = extract_dominant_colors(centered_item)
                 plot_colors(colors)
 
-            if st.button(f"Add {label} to Wardrobe ({idx+1}/{len(clothes)})", key=f"add_{idx}"):
-                save_item(center_and_scale(item), label, idx)
-                st.success(f"Item saved to wardrobe under '{label}'!")
+            # Predict style
+            style, probs = predict_style(centered_item)
+            
+            st.markdown(f"🧷 **Style Prediction for Item {idx+1}**")
+            st.markdown(f"**Predicted Style:** `{style}`")
+            st.progress(probs[style])
 
+            # Show detailed probabilities in a separate expander (not nested)
+            with st.expander(f"🔍 All Style Probabilities for Item {idx+1}"):
+                for s, p in sorted(probs.items(), key=lambda x: -x[1]):
+                    st.write(f"{s.capitalize()}: {p:.2%}")
+
+            # Add to wardrobe
+            if st.button(f"Add {label} to Wardrobe ({idx+1}/{len(clothes)})", key=f"add_{idx}"):
+                save_item(centered_item, label, idx, style=style, style_probs=probs, colors=colors)
+                st.success(f"Item saved to wardrobe under '{label}' with style '{style}'!")
 
 elif page == "View Wardrobe":
     st.title("👗 Your Wardrobe")
 
     wardrobe = list_wardrobe_items()
+    metadata = load_metadata()
+
     if not wardrobe:
         st.info("No items in wardrobe yet. Try uploading from the Upload Clothes tab.")
     else:
@@ -163,6 +290,23 @@ elif page == "View Wardrobe":
             with cols[i % 3]:
                 st.image(item_path, use_container_width=True)
                 st.caption(f"Item {i}: {label.capitalize()}")
-                if st.button("Remove", key=f"remove_{i}"):
-                    os.remove(item_path)
-                    st.rerun()  # Refresh to update the list and UI
+
+                item_id = "/".join(item_path.split("/")[-2:])
+                meta = metadata.get(item_id, {})
+
+                if meta.get("style"):
+                    st.markdown(f"**Style:** `{meta['style']}`")
+
+                btn_col1, btn_col2 = st.columns([1, 1])
+                with btn_col1:
+                    if st.button("Details", key=f"details_{i}"):
+                        show_item_details(item_path, meta)
+                with btn_col2:
+                    if st.button("Remove", key=f"remove_{i}"):
+                        os.remove(item_path)
+                        if item_id in metadata:
+                            del metadata[item_id]
+                            save_metadata(metadata)
+                        st.rerun()
+                if st.button("Get Outfit", key=f"get_outfit_{i}"):
+                    show_outfit_dialog(item_id, metadata)
