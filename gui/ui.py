@@ -26,18 +26,28 @@ METADATA_FILE = os.path.join(WARDROBE_DIR, "wardrobe_metadata.json")
 
 # --- Metadata Loading and Saving ---
 def load_metadata():
+    """
+    Loads wardrobe metadata from a JSON file if it exists.
+    Returns an empty dictionary if the file does not exist.
+    """
     if os.path.exists(METADATA_FILE):
         with open(METADATA_FILE, "r") as f:
             return json.load(f)
     return {}
 
 def save_metadata(metadata):
+    """
+    Saves the given metadata dictionary to a JSON file.
+    """
     with open(METADATA_FILE, "w") as f:
         json.dump(metadata, f, indent=2)
 
 # --- Streamlit Dialogs ---
 @st.dialog("Suggested Outfit")
 def show_outfit_dialog(target_id, metadata):
+    """
+    Shows a dialog with suggested outfit items based on the target item.
+    """
     outfit_ids = suggest_outfit(target_id, metadata)
     
     if not outfit_ids:
@@ -52,6 +62,9 @@ def show_outfit_dialog(target_id, metadata):
 
 @st.dialog("Clothing Item Details")
 def show_item_details(item_path, meta):
+    """
+    Shows a dialog with details for a clothing item, including style and colors.
+    """
     st.image(item_path, use_container_width=True)
     
     if meta.get("style"):
@@ -65,12 +78,18 @@ def show_item_details(item_path, meta):
 # --- Model Loading ---
 @st.cache_resource
 def load_clip():
+    """
+    Loads the CLIP processor and model from Hugging Face.
+    """
     processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
     return processor, model
 
 @st.cache_resource
 def load_yolo():
+    """
+    Loads the YOLO model for clothing segmentation.
+    """
     model_path = os.path.join(PATH, "..", "weights", "best.pt")
     return YOLO(model_path)
 
@@ -78,6 +97,10 @@ STYLE_LABELS = ["casual", "formal", "sporty", "streetwear", "bohemian", "busines
 
 @st.cache_resource
 def predict_style(pil_image):
+    """
+    Predicts the clothing style of a PIL image using CLIP.
+    Returns the most probable style and the full probability distribution.
+    """
     processor, model = load_clip()
     inputs = processor(text=STYLE_LABELS, images=pil_image, return_tensors="pt", padding=True)
     with torch.no_grad():
@@ -90,6 +113,9 @@ def predict_style(pil_image):
     return style, dict(zip(STYLE_LABELS, map(float, probs)))
 
 def outfit_similarity(item_a, item_b, weight_style=0.6, weight_color=0.4):
+    """
+    Computes a similarity score between two wardrobe items based on style and color.
+    """
     # Style similarity
     style_sim = cosine_similarity(
         [item_a["style_probs"]], [item_b["style_probs"]]
@@ -103,6 +129,11 @@ def outfit_similarity(item_a, item_b, weight_style=0.6, weight_color=0.4):
     return weight_style * style_sim + weight_color * color_sim
 
 def suggest_outfit(target_id, metadata, top_n=2):
+    """
+    Suggests outfit items that best match the target item, based on similarity.
+    Only items from different categories are considered.
+    Returns the IDs of the top N matching items.
+    """
     target = metadata[target_id]
     label = target["label"]
 
@@ -124,6 +155,12 @@ def suggest_outfit(target_id, metadata, top_n=2):
     return [match[0] for match in top_matches]
 
 def extract_clothes(image):
+    """
+    Uses YOLO to segment clothing items from an image.
+    Returns:
+    - List of (PIL image, label) tuples for each detected item.
+    - Rendered segmentation image (RGB format).
+    """
     model = load_yolo()
     results = model(image)
     orig = np.array(image.convert("RGB"))
@@ -143,12 +180,20 @@ def extract_clothes(image):
             masked_img[:, :, c] = orig[:, :, c] * mask.astype(np.uint8)
         masked_img[:, :, 3] = (mask * 255).astype(np.uint8)
 
-        clothes.append((Image.fromarray(masked_img), label))  # return label with image
-    return clothes
+        clothes.append((Image.fromarray(masked_img), label))
 
+    # Get rendered YOLO image and convert BGR to RGB
+    rendered_image_bgr = result.plot()  # BGR format
+    rendered_image_rgb = cv2.cvtColor(rendered_image_bgr, cv2.COLOR_BGR2RGB)
+
+    return clothes, rendered_image_rgb
 
 # --- Color Extraction ---
 def extract_dominant_colors(pil_img, k=5):
+    """
+    Extracts the k dominant colors from a PIL RGBA image using KMeans clustering.
+    Returns an array of RGB color values.
+    """
     np_image = np.array(pil_img.convert("RGBA"))
     mask = np_image[:, :, 3] > 0
     pixels = np_image[:, :, :3][mask]
@@ -160,6 +205,9 @@ def extract_dominant_colors(pil_img, k=5):
     return kmeans.cluster_centers_.astype(int)
 
 def plot_colors(colors):
+    """
+    Plots a horizontal bar of the given colors using matplotlib and displays it in Streamlit.
+    """
     fig, ax = plt.subplots(figsize=(6, 1))
     for i, color in enumerate(colors):
         hex_color = "#{:02x}{:02x}{:02x}".format(*color)
@@ -169,10 +217,10 @@ def plot_colors(colors):
     plt.axis('off')
     st.pyplot(fig)
 
-
 def center_and_scale(image, output_size=(256, 256)):
     """
     Takes a PIL RGBA image and returns a centered, scaled version on a square canvas.
+    The image is cropped to its alpha bounding box and resized to fit the output size.
     """
     # Ensure RGBA mode
     image = image.convert("RGBA")
@@ -199,6 +247,11 @@ def center_and_scale(image, output_size=(256, 256)):
     return canvas
 
 def save_item(image, label, idx, style=None, style_probs=None, colors=None):
+    """
+    Saves a clothing item image and its metadata to the wardrobe directory.
+    Updates the metadata JSON file with the new item.
+    Returns the file path of the saved image.
+    """
     label_folder = os.path.join(WARDROBE_DIR, label)
     os.makedirs(label_folder, exist_ok=True)
 
@@ -222,6 +275,10 @@ def save_item(image, label, idx, style=None, style_probs=None, colors=None):
     return path
 
 def list_wardrobe_items():
+    """
+    Lists all wardrobe items by scanning the wardrobe directory.
+    Returns a list of (label, file path) tuples for each item.
+    """
     items = []
     for label_dir in os.listdir(WARDROBE_DIR):
         label_path = os.path.join(WARDROBE_DIR, label_dir)
@@ -244,11 +301,13 @@ if page == "Upload Clothes":
 
     if uploaded_file:
         image = Image.open(uploaded_file).convert("RGB")
-        st.image(image, caption="Uploaded Image", use_container_width=True)
+        uploaded_image_slot = st.empty()  # reserve a space for the image
+        uploaded_image_slot.image(image, caption="Uploaded Image", use_container_width=True)
 
         with st.spinner("Segmenting clothes..."):
-            clothes = extract_clothes(image)
+            clothes, segmented_image = extract_clothes(image)
 
+        uploaded_image_slot.image(segmented_image, caption="Segmented Image", use_container_width=True)
         st.success(f"Found {len(clothes)} item(s).")
 
         for idx, (item, label) in enumerate(clothes):
