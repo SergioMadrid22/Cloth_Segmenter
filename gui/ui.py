@@ -17,6 +17,7 @@ if not hasattr(torch, 'classes'):
     torch.classes = types.SimpleNamespace()
 torch.classes.__path__ = []  # Prevent Streamlit from crashing on __path__ lookup
 
+STYLE_LABELS = ["casual", "formal", "sporty", "streetwear", "bohemian", "business", "vintage", "chic"]
 
 PATH = os.path.abspath(os.path.dirname(__file__))
 WARDROBE_DIR = os.path.join(PATH, "wardrobe_items")
@@ -92,8 +93,6 @@ def load_yolo():
     """
     model_path = os.path.join(PATH, "..", "weights", "best.pt")
     return YOLO(model_path)
-
-STYLE_LABELS = ["casual", "formal", "sporty", "streetwear", "bohemian", "business", "vintage", "chic"]
 
 @st.cache_resource
 def predict_style(pil_image):
@@ -274,19 +273,29 @@ def save_item(image, label, idx, style=None, style_probs=None, colors=None):
 
     return path
 
-def list_wardrobe_items():
-    """
-    Lists all wardrobe items by scanning the wardrobe directory.
-    Returns a list of (label, file path) tuples for each item.
-    """
+def list_wardrobe_items(filter_label=None):
     items = []
     for label_dir in os.listdir(WARDROBE_DIR):
         label_path = os.path.join(WARDROBE_DIR, label_dir)
         if os.path.isdir(label_path):
-            for f in os.listdir(label_path):
-                if f.endswith(".png"):
-                    items.append((label_dir, os.path.join(label_path, f)))
+            if filter_label is None or filter_label == label_dir:
+                for f in os.listdir(label_path):
+                    if f.endswith(".png"):
+                        items.append((label_dir, os.path.join(label_path, f)))
     return items
+
+def get_all_labels():
+    """
+    Returns a sorted list of non-empty label subfolders in the wardrobe directory.
+    """
+    labels = []
+    for d in os.listdir(WARDROBE_DIR):
+        dir_path = os.path.join(WARDROBE_DIR, d)
+        if os.path.isdir(dir_path):
+            # Check if the folder contains any .png files
+            if any(f.endswith(".png") for f in os.listdir(dir_path)):
+                labels.append(d)
+    return sorted(labels)
 
 # --- UI Setup ---
 st.set_page_config(page_title="AI Wardrobe", layout="centered")
@@ -338,34 +347,40 @@ if page == "Upload Clothes":
 elif page == "View Wardrobe":
     st.title("👗 Your Wardrobe")
 
-    wardrobe = list_wardrobe_items()
-    metadata = load_metadata()
+    labels = get_all_labels()
 
-    if not wardrobe:
+    if not labels:
         st.info("No items in wardrobe yet. Try uploading from the Upload Clothes tab.")
     else:
-        cols = st.columns(3)
-        for i, (label, item_path) in enumerate(wardrobe):
-            with cols[i % 3]:
-                st.image(item_path, use_container_width=True)
-                st.caption(f"Item {i}: {label.capitalize()}")
+        metadata = load_metadata()
+        selected_label = st.selectbox("Filter by category", ["All"] + labels)
+        filter_label = None if selected_label == "All" else selected_label
+        wardrobe = list_wardrobe_items(filter_label)
+        if not wardrobe:
+            st.warning(f"No items found for '{selected_label}'.")
+        else:
+            cols = st.columns(3)
+            for i, (label, item_path) in enumerate(wardrobe):
+                with cols[i % 3]:
+                    st.image(item_path, use_container_width=True)
+                    st.caption(f"Item {i}: {label.capitalize()}")
 
-                item_id = "/".join(item_path.split("/")[-2:])
-                meta = metadata.get(item_id, {})
+                    item_id = "/".join(item_path.split("/")[-2:])
+                    meta = metadata.get(item_id, {})
 
-                if meta.get("style"):
-                    st.markdown(f"**Style:** `{meta['style']}`")
+                    if meta.get("style"):
+                        st.markdown(f"**Style:** `{meta['style']}`")
 
-                btn_col1, btn_col2 = st.columns([1, 1])
-                with btn_col1:
-                    if st.button("Details", key=f"details_{i}"):
-                        show_item_details(item_path, meta)
-                with btn_col2:
-                    if st.button("Remove", key=f"remove_{i}"):
-                        os.remove(item_path)
-                        if item_id in metadata:
-                            del metadata[item_id]
-                            save_metadata(metadata)
-                        st.rerun()
-                if st.button("Get Outfit", key=f"get_outfit_{i}"):
-                    show_outfit_dialog(item_id, metadata)
+                    btn_col1, btn_col2 = st.columns([1, 1])
+                    with btn_col1:
+                        if st.button("Details", key=f"details_{i}"):
+                            show_item_details(item_path, meta)
+                    with btn_col2:
+                        if st.button("Remove", key=f"remove_{i}"):
+                            os.remove(item_path)
+                            if item_id in metadata:
+                                del metadata[item_id]
+                                save_metadata(metadata)
+                            st.rerun()
+                    if st.button("Get Outfit", key=f"get_outfit_{i}"):
+                        show_outfit_dialog(item_id, metadata)
