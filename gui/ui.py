@@ -19,6 +19,27 @@ torch.classes.__path__ = []  # Prevent Streamlit from crashing on __path__ looku
 
 STYLE_LABELS = ["casual", "formal", "sporty", "streetwear", "bohemian", "business", "vintage", "chic"]
 
+all_labels = [
+    "shirt, blouse", "top, t-shirt, sweatshirt", "sweater", "cardigan", "jacket", "vest",
+    "pants", "shorts", "skirt", "coat", "dress", "jumpsuit", "cape", "glasses", "hat",
+    "headband, head covering, hair accessory", "tie", "glove", "watch", "belt", "leg warmer",
+    "tights, stockings", "sock", "shoe", "bag, wallet", "scarf", "umbrella", "hood", "collar",
+    "lapel", "epaulette", "sleeve", "pocket", "neckline", "buckle", "zipper", "applique", "bead",
+    "bow", "flower", "fringe", "ribbon", "rivet", "ruffle", "sequin", "tassel"
+]
+
+superior_parts = [
+    "shirt, blouse", "top, t-shirt, sweatshirt", "sweater", "cardigan",
+    "jacket", "vest", "coat", "cape", "hood"
+]
+inferior_parts = ["pants", "shorts", "skirt", "tights, stockings", "leg warmer"]
+full_body_parts = ["dress", "jumpsuit"]
+feet_parts = ["sock", "shoe"]
+
+classified = set(superior_parts + inferior_parts + full_body_parts + feet_parts)
+other_parts = [label for label in all_labels if label not in classified]
+
+# --- Dirs ---
 PATH = os.path.abspath(os.path.dirname(__file__))
 WARDROBE_DIR = os.path.join(PATH, "wardrobe_items")
 os.makedirs(WARDROBE_DIR, exist_ok=True)
@@ -127,31 +148,82 @@ def outfit_similarity(item_a, item_b, weight_style=0.6, weight_color=0.4):
 
     return weight_style * style_sim + weight_color * color_sim
 
-def suggest_outfit(target_id, metadata, top_n=2):
+def get_part_group(label):
+    """
+    Returns the clothing group for a given label.
+    """
+    if label in superior_parts:
+        return "superior"
+    elif label in inferior_parts:
+        return "inferior"
+    elif label in full_body_parts:
+        return "full_body"
+    elif label in feet_parts:
+        return "feet"
+    else:
+        return "other"
+
+def get_required_groups(target_group):
+    """
+    Given the group of the target item, returns the required groups to recommend.
+    """
+    if target_group == "full_body":
+        return {"feet", "other"}
+    elif target_group == "superior":
+        return {"inferior", "feet"}
+    elif target_group == "inferior":
+        return {"superior", "feet"}
+    elif target_group == "feet":
+        return {"superior", "inferior"}
+    elif target_group == "other":
+        return {"superior", "inferior", "full_body", "feet", "other"}
+    else:
+        return set()
+
+def filter_candidates_by_group(metadata, target_id, required_groups):
+    """
+    Filters and groups metadata items by group, excluding the target item.
+    Returns a dict: group -> list of (id, item)
+    """
+    grouped = {g: [] for g in required_groups}
+    for cid, item in metadata.items():
+        if cid == target_id:
+            continue
+        group = get_part_group(item["label"])
+        if group in required_groups:
+            grouped[group].append((cid, item))
+    return grouped
+
+
+def suggest_outfit(target_id, metadata, per_group_n=1):
     """
     Suggests outfit items that best match the target item, based on similarity.
-    Only items from different categories are considered.
+    - Only items from different clothing part groups are considered.
+    - Ensures coverage of the required clothing groups.
+    - If the target is a full-body item, excludes both superior and inferior items
     Returns the IDs of the top N matching items.
     """
     target = metadata[target_id]
     label = target["label"]
+    target_group = get_part_group(label)
 
-    # Only compare with items in different categories
-    candidates = {
-        k: v for k, v in metadata.items()
-        if k != target_id and v["label"] != label
-    }
-
-    if not candidates:
+    required_groups = get_required_groups(target_group)
+    if not required_groups:
         return []
 
-    scores = []
-    for cid, data in candidates.items():
-        score = outfit_similarity(target, data)
-        scores.append((cid, score))
+    grouped_candidates = filter_candidates_by_group(metadata, target_id, required_groups)
 
-    top_matches = sorted(scores, key=lambda x: -x[1])[:top_n]
-    return [match[0] for match in top_matches]
+    selected_ids = []
+    for group, items in grouped_candidates.items():
+        scored = [
+            (cid, outfit_similarity(target, item))
+            for cid, item in items
+        ]
+        top = sorted(scored, key=lambda x: -x[1])[:per_group_n]
+        selected_ids.extend([cid for cid, _ in top])
+
+    return selected_ids
+
 
 def extract_clothes(image):
     """
